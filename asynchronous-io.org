@@ -1,0 +1,224 @@
+#+TITLE: asynchronous-io
+#+AUTHOR: GongCun
+* 各种 I/O 模型总结
+
+* 对异步 I/O 的简单介绍
+同步 I/O 是非常常见的, 当我们调用一个 I/O 操作, 并直到其完成或超时才返回, 则称之
+为同步I/O (synchronous-io). 同步 I/O 並不是原罪：如果你不需要在等待返回的時候做
+其他事情的話。但是如果你想要在同步 I/O 中同時處理多個連接，則會產生問題：
+#+begin_src c
+  /* This won't work */
+  char buf[1024];
+  int i, n;
+  while (i_still_want_to_read()) {
+      for (i = 0; i < n_sockets; ++i) {
+          n = recv(fd[i], buf, sizeof(buf), 0);
+          if (n == 0)
+              handle_close(fd[i]);
+          else if (n < 0)
+              handle_error(fd[i], errno);
+          else
+              handle_input(fd[i], buf, n);
+      }
+  }
+#+end_src
+如果數據在描述符 fd[2] 上到達，而在 fd[0] 和 fd[1] 上沒有能獲得數據并處理完成，
+則以上程序將永遠不能從 fd[2] 上讀取。
+
+有些人通過多線程或多進程服務來解決這個問題。最簡單的方式就是通過不同的進程來處理
+各個連接，每個進程上都是同步 I/O （blocking I/O）。但這種方式仍然存在問題：首先，
+進行的開銷是很大的，可能你會使用一個線程池來作為替代方案，但是線程池的伸縮往往不
+盡人意，如果你的程序需要同一時間處理成千上萬條連接，那麼處理的效率並不比每個 CPU
+只處理少量的線程更高。
+
+如果線程仍然不是處理多個連接的最佳答案，那麼什麼才是？在 Unix 編程範式中，是通過
+非阻塞套接字（nonblocking）：
+#+BEGIN_SRC c
+  fcntl(fd, F_SETFL, O_NONBLOCK);
+#+END_SRC
+一旦對套接字指定了 nonblocking, 那麼, 任何時候對套接字進行調用時, 將會完成調用,
+或者得到一個錯誤返回, 表示 "I couldn’t make any progress now, try again.", 這樣
+我們的 two-socket 例子可以粗略地寫成:
+#+BEGIN_SRC c
+  /* Bad Example: busy-polling all sockets
+   ,* This will work, but the performance will be unforgivably bad. */
+
+  int i, n;
+  char buf[1024];
+  for (i = 0; i < n_sockets; ++i)
+      fcntl(fd[i], F_SETFL, O_NONBLOCK);
+
+  while (i_still_want_to_read()) {
+      for (i = 0; i < n_sockets; ++i) {
+          n = recv(fd[i], buf, sizeof(buf), 0);
+          if (n == 0) {
+              handle_close(fd[i]);
+          } else if (n < 0) {
+              if (errno == EAGAIN)
+                  ; /* The kernel didn't have any data for us to read */
+              else
+                  handle_error(fd[i], errno);
+          } else {
+              handle_input(fd[i], buf, n);
+          }
+      }
+  }
+
+#+END_SRC
+現在我們確實使用了非阻塞 I/O, 而且以上代碼可以工作...但是幾乎一無是處. 由於兩種
+原因, 性能將會差得可怕. 第一, 當在每一個連接上都沒有數據可讀時, 循環將無限旋轉,
+從而耗盡所有 CPU 週期. 第二, 當你試圖用這種方法去處理一個以上的連接時, 則無論是
+否有任何數據, 都將對其進行內核調用. 因此, 我們需要一種方法來告訴內核 "如果某些套
+接字準備好給我一些數據, 那麼請告訴我那些已經準備好".
+
+最古老的方式是通過 select() 調用. select() 通過設置三類文件描述符集(通過 bit
+arrays 實現): 一個用於讀, 一個用於寫, 以及一個用於例外 (exception). 它等待直到某
+個套接字就緒並改变已就緒的套接字集合.
+
+示例:
+#+BEGIN_SRC c
+  /* If you only have a couple dozen fds, this version won't be awful */
+  fd_set readset;
+  int i, n;
+  char buf[1024];
+
+  while (i_still_want_to_read()) {
+      int maxfd = -1;
+      FD_ZERO(&readset);
+
+      /* Add all of the interesting fds to readset */
+      for (i = 0; i < n_sockets; ++i) {
+          if (fd[i] > maxfd)
+              maxfd = fd[i];
+          FD_SET(fd[i], &readset);
+      }
+
+      /* Wait until one or more fds are ready to read */
+      select(maxfd+1, &readset, NULL, NULL, NULL);
+
+      /* Process all of the fds that are still set in readset */
+      for (i = 0; i < n_sockets; ++i) {
+          if (FD_ISSET(fd[i], &readset)) {
+              n = recv(fd[i], buf, sizeof(buf), 0);
+              if (n == 0) {
+                  handle_close(fd[i]);
+              } else if (n < 0) {
+                  if (errno == EAGAIN)
+                      ; /* The kernel didn't have any data for us to read */
+                  else
+                      handle_error(fd[i], errno);
+              } else {
+                  handle_input(fd[i]);
+              }
+          }
+      }
+  }
+#+END_SRC
+
+这里是通过 select 实现的 ROT13 服务器：
+#+BEGIN_SRC c
+  /* Example: select()-based ROT13 server */
+
+  /* For sockaddr_in */
+  #include <netinet/in.h>
+  /* For socket functions */
+  #include <sys/socket.h>
+  /* For fcntl */
+  #include <fcntl.h>
+  /* For select */
+  #include <sys/select.h>
+
+  #include <assert.h>
+  #include <unistd.h>
+  #include <string.h>
+  #include <stdlib.h>
+  #include <stdio.h>
+  #include <errno.h>
+
+  #define MAX_LINE 16384
+
+  char rot13_char(char c)
+  {
+      /* We don't want to use isalpha here; setting the locale would change
+       ,* which characters are considered alphabetical. */
+      if ((c >= 'a' && c <= 'm') ||
+          (c >= 'A' && c <= 'M'))
+          return c + 13;
+      else if ((c >= 'n' && c <= 'z') ||
+               (c >= 'N' && c <= 'Z'))
+          return c - 13;
+      else
+          return c;
+  }
+
+  struct fd_state {
+      char buffer[MAX_LINE];
+      size_t buffer_used;
+
+      int writing;
+      size_t n_written;
+      size_t write_upto;
+  };
+
+  struct fd_state *alloc_fd_state(void)
+  {
+      struct fd_state *state = malloc(sizeof(struct fd_state));
+      if (!state)
+          return NULL;
+
+      state->buffer_used = 0;
+      state->n_written   = 0;
+      state->write_upto  = 0;
+      state->writing     = 0;
+
+      return state;
+  }
+
+  void free_fd_state(struct fd_state *state)
+  {
+      free(state);
+  }
+
+  void make_nonblocking(int fd)
+  {
+      fcntl(fd, F_SETFL, O_NONBLOCK);
+  }
+
+  int do_read(int fd, struct fd_state *state)
+  {
+      char buf[1024];
+      int i;
+      ssize_t result;
+    
+  }
+#+END_SRC
+
+但我们仍然没有搞定. 由于生成和读取 select() 的 bit arrays 所花费的时间将与 maxfd
+成正比, 因此当套接字数目很多时, select 调用的扩展性就变得很差.[fn:1]
+
+不同的操作系统提供了对于 select 的不同替代方案。包括 poll(), epoll(), kqueue(),
+evports, 以及 /dev/poll，所有这些都提供了比 select() 更好的性能，并且除了 poll()
+之外都提供了 O(1) 的时间复杂度用于增加、删除套接字，以及当套接字 I/O 就绪时的通
+知。
+
+不幸的是，没有一个高效且通用的接口。Linux 有 epoll()，BSDs（包括 Darwin）有
+kqueue()，Solaris 有 evports 和 /dev/poll... 但没有一个接口在这些操作系统间共用。
+因此如果你想写一个可移植的高可用的异步应用，你将需要一个包装所有这些接口的封装，
+并提供其中最有效的方式。
+
+这就是 Libevent API 提供给你的底层功能：它提供了一致的接口，以替代 select() 的功
+能，并根据不同的操作系统提供最高效的实现。
+
+这里是关于异步服务器 ROT13 的另一个实现版本，使用了 Libevent 2 替换 select()。注
+意 fd_sets 已经被结构体 event_base 所取代，用以关联和取消关联，背后是通过
+select, poll, epoll, kqueue 等实现。 
+
+* Reactor 模式
+
+* Footnotes
+
+
+[fn:1] 从用户空间来说，生产和读取位组的时间与提供给 select() 的 fds 成正比，但是
+在内核方面，读取位组花费的时间和位组中最大的 fd 成正比，而该 fd 往往接近整个程序
+使用的 fds 总数，无论有多少 fds 添加到 select() 中。
+
