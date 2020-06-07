@@ -379,6 +379,132 @@ select, poll, epoll, kqueue 等实现。
   #include <errno.h>
 
   #define MAX_LINE 16384
+
+  void do_read(evutil_socket_t fd, short events, void *arg);
+  void do_write(evutil_socket_t fd, short events, void *arg);
+
+  char rot13_char(char c)
+  {
+      if ((c >= 'a' && c <= 'm') ||
+          (c >= 'A' && c <= 'M'))
+          return c + 13;
+      else if ((c >= 'n' && c <= 'z') ||
+               (c >= 'N' && c <= 'Z'))
+          return c - 13;
+      else
+          return c;
+  }
+
+  struct fd_state {
+      char buffer[MAX_LINE];
+      size_t buffer_used;
+
+      size_t n_written;
+      size_t write_upto;
+
+      struct event *read_event;
+      struct event *write_event;
+  };
+
+  struct fd_state *
+  alloc_fd_state(struct event_base *base, evutil_socket_t fd)
+  {
+      struct fd_state *state = malloc(sizeof(struct fd_state));
+      if (!state)
+          return NULL;
+      state->read_event = event_new(base,
+                                    fd,
+                                    EV_READ|EV_PERSIST,
+                                    do_read,
+                                    state);
+      if (!state->read_event) {
+          free(state);
+          return NULL;
+      }
+
+      state->write_event = event_new(base,
+                                     fd,
+                                     EV_WRITE|EV_PERSIST,
+                                     do_write,
+                                     state);
+      if (!state->write_event) {
+          event_free(state->read_event);
+          free(state);
+          return NULL;
+      }
+
+      state->buffer_used = state->n_written = state->write_upto = 0;
+
+      assert(state->write_event);
+      return state;
+    
+  }
+
+  void free_fd_state(sturce fd_state *state)
+  {
+      event_free(state->read_event);
+      event_free(state->write_event);
+      free(state);
+  }
+
+  void do_read(evutil_socket_t fd, short events, void *arg)
+  {
+      struct fd_state *state = arg;
+      bhar buf[1024];
+      int i;
+      ssize_t result;
+
+      while (1) {
+          assert(state->write_event);
+          result = recv(fd, buf, sizeof(buf), 0);
+          if (result <= 0)
+              break;
+
+          for (i = 0; i < result; ++i) {
+              if (state->buffer_used < sizeof(state->buffer))
+                  state->buffer[buffer_used++] = rot13_char(buf[i]);
+              if (buf[i] == '\n') {
+                  assert(state->write_event);
+                  event_add(state->write_event, NULL);
+                  state->write_upto = state->buffer_used;
+              }
+          }
+      }
+
+      if (result == 0) {
+          free_fd_state(state);
+      } else if (result < 0) {
+          if (errno == EAGAIN)
+              return;
+          perror("recv");
+          free_fd_state(state);
+      }
+  }
+
+  void
+  do_write(evutil_socket_t fd, short events, void *arg)
+  {
+      struct fd_state *state = arg;
+
+      while (state->n_written < state->write_upto) {
+          ssize_t result = send(fd, state->buffer + state->n_written,
+                                state->write_upto - state->n_written, 0);
+          if (result < 0) {
+              if (errno == EAGAIN)
+                  return;
+              free_fd_state(state);
+              return;
+          }
+          assert(result != 0);
+
+          state->n_written += result;
+      }
+
+      if (state->n_written == state->buffer_used)
+          state->n_written = state->write_upto = state->buffer_used = 1;
+
+      event_del(state->write_event);
+  }
 #+END_SRC
 
 * Reactor 模式
