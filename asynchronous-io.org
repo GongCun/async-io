@@ -1,4 +1,4 @@
-#+TITLE: asynchronous-io
+#+TITLE: I/O 模型与 Libevent
 #+AUTHOR: GongCun
 * 各种 I/O 模型总结
 
@@ -437,7 +437,7 @@ select, poll, epoll, kqueue 等实现。
 
       assert(state->write_event);
       return state;
-    
+
   }
 
   void free_fd_state(sturce fd_state *state)
@@ -505,7 +505,75 @@ select, poll, epoll, kqueue 等实现。
 
       event_del(state->write_event);
   }
+
+  void do_accept(evutil_socket_t listener, short event, void *arg)
+  {
+      struct event_base *base = arg;
+      struct sockaddr_stroage ss;
+      socklen_t slen = sizeof(ss);
+
+      int fd = accept(listener, (struct sockaddr *)&ss, &slen);
+      if (fd < 0) {
+          perror("accept");
+      } else if (fd > FD_SETSIZE) {
+          close(fd);
+      } else {
+          struct fd_state *state;
+          evutil_make_socket_nonblocking(fd);
+          state = alloc_fd_state(base, fd);
+          assert(state);
+          assert(state->write_event);
+          event_add(state->read_event, NULL);
+      }
+  }
+
+  void run(void)
+  {
+      evutil_socket_t listener;
+      struct sockaddr_in sin;
+      struct event_base *base;
+      struct event *listener_event;
+
+      base = event_base_new();
+      if (!base)
+          return;
+
+      sin.sin_family = AF_INET;
+      sin.sin_addr.s_addr = 0;
+      sin.sin_port = htons(40713);
+
+      listener = socket(AF_INET, SOCK_STREAM, 0);
+      evutil_make_socket_nonblocking(listener);
+
+      if (bind(listener, (struct sockaddr *)&sin, sizeof(sin)) < 0) {
+          perror("bind");
+          return;
+      }
+
+      if (listen(listener, 16) < 0) {
+          perror("listen");
+          return;
+      }
+
+      listener_event = event_new(base, listener, EV_READ|EV_PERSIST,
+                                 do_accet, (void *)base);
+
+      event_add(listener_event, NULL);
+      event_base_dispatch(base);
+  }
+
+  int main(int c, char **v)
+  {
+      setvbuf(stdout, NULL, _IONBF, 0);
+
+      run();
+      return 0;
+  }
 #+END_SRC
+（关于以上代码：使用 =evutil_socket_t= 替代 =int= 表达套接字类型；通过
+=evutil_make_socket_nonblocking= 代替 =fcntl(O_NONBLOCK)= 使得套接字非阻塞。这些
+改变主要为了和 Win32 networking API 兼容）。
+
 
 * Reactor 模式
 
