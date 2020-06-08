@@ -6,8 +6,8 @@ TEMPFILES = core core.* *.o temp.* *.out *~
 all: $(PROG)
 
 $(PROG): %: %.c
-        $(CC) $(CFLAGS) -o $@ $^
+	$(CC) $(CFLAGS) -o $@ $^
 
 clean:
-        rm -f $(TEMPFILES) $(PROG)
+	rm -f $(TEMPFILES) $(PROG)
 
