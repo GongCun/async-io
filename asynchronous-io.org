@@ -227,7 +227,7 @@ arrays 實現): 一個用於讀, 一個用於寫, 以及一個用於例外 (exce
                   return 0;
               return -1;
           }
-          assert(result != 0)
+          assert(result != 0);
           state->n_written += result;
       }
 
@@ -254,7 +254,7 @@ arrays 實現): 一個用於讀, 一個用於寫, 以及一個用於例外 (exce
           state[i] = NULL;
       }
 
-      listener = socker(AF_INET, SOCK_STREAM, 0);
+      listener = socket(AF_INET, SOCK_STREAM, 0);
       make_nonblocking(listener);
 
       if (bind(listener, (struct sockaddr *)&sin, sizeof(sin)) < 0) {
@@ -297,7 +297,7 @@ arrays 實現): 一個用於讀, 一個用於寫, 以及一個用於例外 (exce
           }
 
           if (FD_ISSET(listener, &readset)) {
-              struct sockaddr_stroage ss;
+              struct sockaddr_storage ss;
               socklen_t slen = sizeof(ss);
               int fd = accept(listener, (struct sockaddr *)&ss, &slen);
               if (fd < 0) {
