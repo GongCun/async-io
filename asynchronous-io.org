@@ -444,7 +444,7 @@ select, poll, epoll, kqueue 等实现。
 
   }
 
-  void free_fd_state(sturce fd_state *state)
+  void free_fd_state(struct fd_state *state)
   {
       event_free(state->read_event);
       event_free(state->write_event);
@@ -454,7 +454,7 @@ select, poll, epoll, kqueue 等实现。
   void do_read(evutil_socket_t fd, short events, void *arg)
   {
       struct fd_state *state = arg;
-      bhar buf[1024];
+      char buf[1024];
       int i;
       ssize_t result;
 
@@ -466,7 +466,7 @@ select, poll, epoll, kqueue 等实现。
 
           for (i = 0; i < result; ++i) {
               if (state->buffer_used < sizeof(state->buffer))
-                  state->buffer[buffer_used++] = rot13_char(buf[i]);
+                  state->buffer[state->buffer_used++] = rot13_char(buf[i]);
               if (buf[i] == '\n') {
                   assert(state->write_event);
                   event_add(state->write_event, NULL);
@@ -513,7 +513,7 @@ select, poll, epoll, kqueue 等实现。
   void do_accept(evutil_socket_t listener, short event, void *arg)
   {
       struct event_base *base = arg;
-      struct sockaddr_stroage ss;
+      struct sockaddr_storage ss;
       socklen_t slen = sizeof(ss);
 
       int fd = accept(listener, (struct sockaddr *)&ss, &slen);
@@ -560,7 +560,7 @@ select, poll, epoll, kqueue 等实现。
       }
 
       listener_event = event_new(base, listener, EV_READ|EV_PERSIST,
-                                 do_accet, (void *)base);
+                                 do_accept, (void *)base);
 
       event_add(listener_event, NULL);
       event_base_dispatch(base);
