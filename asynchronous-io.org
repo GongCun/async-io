@@ -319,6 +319,10 @@ arrays 實現): 一個用於讀, 一個用於寫, 以及一個用於例外 (exce
                   r = do_read(i, state[i]);
               }
 
+              if (r == 0 && FD_ISSET(i, &writeset)) {
+                  r = do_write(i, state[i]);
+              }
+
               if (r) {
                   free_fd_state(state[i]);
                   state[i] = NULL;
