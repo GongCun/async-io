@@ -108,7 +108,7 @@ int do_write(int fd, struct fd_state *state)
                 return 0;
             return -1;
         }
-        assert(result != 0)
+        assert(result != 0);
         state->n_written += result;
     }
 
@@ -135,7 +135,7 @@ void run(void)
         state[i] = NULL;
     }
 
-    listener = socker(AF_INET, SOCK_STREAM, 0);
+    listener = socket(AF_INET, SOCK_STREAM, 0);
     make_nonblocking(listener);
 
     if (bind(listener, (struct sockaddr *)&sin, sizeof(sin)) < 0) {
@@ -178,7 +178,7 @@ void run(void)
         }
 
         if (FD_ISSET(listener, &readset)) {
-            struct sockaddr_stroage ss;
+            struct sockaddr_storage ss;
             socklen_t slen = sizeof(ss);
             int fd = accept(listener, (struct sockaddr *)&ss, &slen);
             if (fd < 0) {
