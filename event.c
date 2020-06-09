@@ -35,8 +35,8 @@ char rot13_char(char c)
 
 struct fd_state {
     char buffer[MAX_LINE];
-    size_t buffer_used;
 
+    size_t buffer_used;
     size_t n_written;
     size_t write_upto;
 
