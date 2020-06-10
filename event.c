@@ -7,7 +7,7 @@
 /* For fcntl */
 #include <fcntl.h>
 
-#include <event.h>
+#include <event2/event.h>
 
 #include <assert.h>
 #include <unistd.h>
@@ -139,7 +139,7 @@ do_write(evutil_socket_t fd, short events, void *arg)
     }
 
     if (state->n_written == state->buffer_used)
-        state->n_written = state->write_upto = state->buffer_used = 1;
+        state->n_written = state->write_upto = state->buffer_used = 0;
 
     event_del(state->write_event);
 }
@@ -193,11 +193,17 @@ void run(void)
         return;
     }
 
-    listener_event = event_new(base, listener, EV_READ|EV_PERSIST,
-                               do_accept, (void *)base);
+    listener_event = event_new(base,
+                               listener,
+                               EV_READ|EV_PERSIST,
+                               do_accept,
+                               (void *)base);
 
     event_add(listener_event, NULL);
     event_base_dispatch(base);
+
+    event_free(listener_event);
+    event_base_free(base);
 }
 
 int main(int c, char **v)
