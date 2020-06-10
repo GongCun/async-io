@@ -81,7 +81,7 @@ alloc_fd_state(struct event_base *base, evutil_socket_t fd)
 void free_fd_state(struct fd_state *state)
 {
     event_free(state->read_event);
-    event_free(state->write_event);
+    /* event_free(state->write_event); */
     free(state);
 }
 
@@ -101,21 +101,22 @@ void do_read(evutil_socket_t fd, short events, void *arg)
         for (i = 0; i < result; ++i) {
             if (state->buffer_used < sizeof(state->buffer))
                 state->buffer[state->buffer_used++] = rot13_char(buf[i]);
-            if (buf[i] == '\n') {
-                assert(state->write_event);
-                event_add(state->write_event, NULL);
-                state->write_upto = state->buffer_used;
-            }
         }
     }
 
     if (result == 0) {
-        free_fd_state(state);
+        /* We complete with read, delete the event and set write event to echo
+           back to the sender */
+        event_del(state->read_event);
+        assert(state->write_event);
+        event_add(state->write_event, NULL);
+        state->write_upto = state->buffer_used;
     } else if (result < 0) {
         if (errno == EAGAIN)
             return;
         perror("recv");
         free_fd_state(state);
+        close(fd);
     }
 }
 
@@ -142,6 +143,8 @@ do_write(evutil_socket_t fd, short events, void *arg)
         state->n_written = state->write_upto = state->buffer_used = 0;
 
     event_del(state->write_event);
+    free_fd_state(state);
+    close(fd);
 }
 
 void do_accept(evutil_socket_t listener, short event, void *arg)
