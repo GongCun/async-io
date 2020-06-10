@@ -1,5 +1,5 @@
 CC = gcc
-CFLAGS = -g -Wall
+CFLAGS = -ggdb -Wall -O0
 LIBS = -levent
 PROG = select
 TEMPFILES = core core.* *.o temp.* *.out *~
