@@ -365,7 +365,7 @@ kqueue()，Solaris 有 evports 和 /dev/poll... 但没有一个接口在这些�
 意 fd_sets 已经被结构体 event_base 所取代，用以关联和取消关联，背后是通过
 select, poll, epoll, kqueue 等实现。 
 
-以下是使用 Libevent 的例子：
+以下是使用 Libevent 的例子：[fn:2]
 #+BEGIN_SRC c
   /* Example: A low-level ROT13 server with Libevent */
 
@@ -404,8 +404,8 @@ select, poll, epoll, kqueue 等实现。
 
   struct fd_state {
       char buffer[MAX_LINE];
-      size_t buffer_used;
 
+      size_t buffer_used;
       size_t n_written;
       size_t write_upto;
 
@@ -450,7 +450,7 @@ select, poll, epoll, kqueue 等实现。
   void free_fd_state(struct fd_state *state)
   {
       event_free(state->read_event);
-      event_free(state->write_event);
+      /* event_free(state->write_event); */
       free(state);
   }
 
@@ -470,21 +470,22 @@ select, poll, epoll, kqueue 等实现。
           for (i = 0; i < result; ++i) {
               if (state->buffer_used < sizeof(state->buffer))
                   state->buffer[state->buffer_used++] = rot13_char(buf[i]);
-              if (buf[i] == '\n') {
-                  assert(state->write_event);
-                  event_add(state->write_event, NULL);
-                  state->write_upto = state->buffer_used;
-              }
           }
       }
 
       if (result == 0) {
-          free_fd_state(state);
+          /* We complete with read, delete the event and set write event to echo
+             back to the sender */
+          event_del(state->read_event);
+          assert(state->write_event);
+          event_add(state->write_event, NULL);
+          state->write_upto = state->buffer_used;
       } else if (result < 0) {
           if (errno == EAGAIN)
               return;
           perror("recv");
           free_fd_state(state);
+          close(fd);
       }
   }
 
@@ -508,9 +509,11 @@ select, poll, epoll, kqueue 等实现。
       }
 
       if (state->n_written == state->buffer_used)
-          state->n_written = state->write_upto = state->buffer_used = 1;
+          state->n_written = state->write_upto = state->buffer_used = 0;
 
       event_del(state->write_event);
+      free_fd_state(state);
+      close(fd);
   }
 
   void do_accept(evutil_socket_t listener, short event, void *arg)
@@ -562,11 +565,17 @@ select, poll, epoll, kqueue 等实现。
           return;
       }
 
-      listener_event = event_new(base, listener, EV_READ|EV_PERSIST,
-                                 do_accept, (void *)base);
+      listener_event = event_new(base,
+                                 listener,
+                                 EV_READ|EV_PERSIST,
+                                 do_accept,
+                                 (void *)base);
 
       event_add(listener_event, NULL);
       event_base_dispatch(base);
+
+      event_free(listener_event);
+      event_base_free(base);
   }
 
   int main(int c, char **v)
@@ -581,11 +590,82 @@ select, poll, epoll, kqueue 等实现。
 =evutil_make_socket_nonblocking= 代替 =fcntl(O_NONBLOCK)= 使得套接字非阻塞。这些
 改变主要为了和 Win32 networking API 兼容）。
 
+你可能会注意到我们的代码变得更有效率了，同时也变得更加复杂。回到 fork 模型，我们
+并不需要为每一个连接管理一个缓冲区：我们只需要为每一个进程分配一个栈上缓冲区
+（stack-allocated buffer）即可。我们也不需要明确地追踪每个套接字是否正在读写，并
+且，我们也不需要一种数据结构来追踪每个操作完成了多少：我们只使用了循环和栈上变量。
+
+此外，如果您对 Windows 上的网络编程具有深厚经验，您会意识到上面的 Libevent 示例
+可能无法获得最佳性能。在 Windows 上，执行快速异步 I/O 的方法不是使用类似
+select() 的接口，而是通过使用 IOCP（I/O 完成端口）API。与所有快速网络 API 不同，
+当套接字已经准备好执行操作时，IOCP 并不会通知您的程序开始操作，而是，程序告诉
+Windows 网络栈当套接字就绪时开始操作，当操作完成时，IOCP 通知程序。[fn:3]
+
+幸运的是，Libevent 2 "bufferevents" 接口解决了这些问题：既使程序易于编写，同时接
+口在 Windows 和 Unix 都提供了高效的实现。
+
+最后，这是我们使用 bufferevents API 实现的 ROT13 服务器
+#+BEGIN_SRC c
+  /* For sockaddr_in */
+  #include <netinet/in.h>
+  /* For socket functions */
+  #include <sys/socket.h>
+  /* For fcntl */
+  #include <fcntl.h>
+
+  #include <event2/event.h>
+  #include <event2/buffer.h>
+  #include <event2/bufferevent.h>
+
+  #include <assert.h>
+  #include <unistd.h>
+  #include <string.h>
+  #include <stdlib.h>
+  #include <stdio.h>
+  #include <errno.h>
+
+  #define MAX_LINE 16384
+
+  void do_read(evutil_socket_t fd, short events, void *arg);
+  void do_write(evutil_socket_t fd, short events, void *arg);
+
+  char
+  rot13_char(char c)
+  {
+      /* We don't want to use isalpha here; setting the locale would change
+       ,* which characters are considered alphabetical. */
+      if ((c >= 'a' && c <= 'm') || (c >= 'A' && c <= 'M'))
+          return c + 13;
+      else if ((c >= 'n' && c <= 'z') || (c >= 'N' && c <= 'Z'))
+          return c - 13;
+      else
+          return c;
+  }
+
+  void
+  readcb(struct bufferevent *bev, void *ctx)
+  {
+      struct evbuffer *input, *output;
+      char *line;
+      size_t n;
+      int i;
+      input = bufferevent_get_input(bev);
+      output = bufferevent_get_output(bev);
+    
+  }
+#+END_SRC
 
 * Reactor 模式
 
 * Footnotes
 
+[fn:3] 有两种触发模式：1）水平触发（LT），需要在事件触发后主动完成I/O，并向上层
+代码直接提供 buffer；2）边缘触发（ET），可选择只管理事件通知，由上层代码完成 I/O
+并管理 buffer。水平触发的时效性更好，但底层主动 I/O 和上层代码并发操作 buffer，
+会引起额外的并发开销。
+
+[fn:2] 官方教程的 [[https://github.com/nmathewson/libevent-book/blob/master/examples_01/01_rot13_server_libevent.c][sample 代码]]有误，在 echo back 之后没有关闭套接字，参考[[https://gist.github.com/ajhwb/3685796][这里]]修正
+了。
 
 [fn:1] 从用户空间来说，生产和读取位组的时间与提供给 select() 的 fds 成正比，但是
 在内核方面，读取位组花费的时间和位组中最大的 fd 成正比，而该 fd 往往接近整个程序
